@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "互关检测助手 for X",
-  "version": "1.9.3",
-  "description": "查看 X（Twitter）上谁取关了你：找出曾经互关、后来取关你的账号，区分真取关与账号受限，并可分批取关。非 X 官方产品。",
+  "name": "互关检测助手 for X（名单保护版）",
+  "version": "1.9.4",
+  "description": "整理 X 互关与未回关名单，保护今天或近7天新增关注，管理永久白名单，支持双向排序和可调竖屏面板。非 X 官方产品。",
   "permissions": [
     "storage"
   ],
@@ -31,10 +31,13 @@
         "https://twitter.com/*"
       ],
       "js": [
+        "ui-controls.js",
+        "relationship-guards.js",
         "content.js"
       ],
       "css": [
-        "content.css"
+        "content.css",
+        "dashboard.css"
       ],
       "run_at": "document_idle"
     }
@@ -55,3 +58,4 @@
   },
   "short_name": "互关检测助手"
 }
+

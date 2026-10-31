@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+<title>互关助手竖屏版 · 虚构数据界面预览</title>
+<link rel="stylesheet" href="../x-mutual-checker/content.css">
+<link rel="stylesheet" href="../x-mutual-checker/dashboard.css?v=1.9.4r2">
+<style>
+  body{margin:0;background:#0b1017;color:#e7e9ea;font:16px/1.7 system-ui;padding:32px;min-height:100vh;box-sizing:border-box}
+  main{max-width:480px;padding:24px;border:1px solid #293441;border-radius:20px;background:#111923}
+  h1{font-size:24px;margin-top:0}p{color:#aebdce}a{color:#52b8ff}code{font-size:14px}
+  #preview-status{font-size:14px;color:#72e1c3}.preview-pill{display:inline-block;border:1px solid #324252;padding:3px 12px;border-radius:20px;font-size:13px}
+</style>
+<main><span class="preview-pill">本机界面预览 · 虚构账号</span>
+<h1>互关检测助手 · 名单保护版</h1>
+<p>打开面板后可排除今天或近7天关注的账号；白名单会永久保存，也能移出恢复。日期未知会明确标注。</p>
+<button id="fixture-follow" data-testid="90001-follow" style="padding:9px 14px;border:0;border-radius:9px;background:#159caa;color:white">模拟关注演示账号</button>
+<p><button id="probe-white">测试白名单拦截</button> <button id="probe-recent">测试近期保护拦截</button></p>
+<p id="probe-result" role="status">账号操作测试尚未运行</p>
+<p>本页只加载真实界面脚本，使用虚构名单与模拟扩展存储。扫描、取关和悬停查询均不连接 X。</p>
+<p id="preview-status">正在载入界面…</p>
+<a href="/fixture_profile" data-testid="AppTabBar_Profile_Link" hidden>fixture_profile</a>
+</main>
+<script src="../x-mutual-checker/ui-controls.js?v=1.9.4r2"></script>
+<script src="../x-mutual-checker/relationship-guards.js?v=1.9.4r2"></script>
+<script src="preview.js?v=1.9.4r2"></script>
+</html>

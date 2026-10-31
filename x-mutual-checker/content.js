@@ -60,18 +60,31 @@
   }
 
   async function autoUnfollow(id) {
-    const key = 'xmf_tab_' + id;
+    let authorization;
+    try { authorization = await chrome.runtime.sendMessage({ type: 'authorizeUnfollowFallback', id }); }
+    catch { return; }
+    if (!authorization?.ok || typeof authorization.resultKey !== 'string' ||
+        !authorization.resultKey.startsWith('xmf_tab_')) return;
+    const key = authorization.resultKey;
     let result;
     try {
+      if (getViewerId() !== authorization.owner) throw new Error('当前账号已变化，未执行取关');
+      if (await autoActionProtected(id)) throw new Error('该账号受名单保护，未执行取关');
       const btn = await waitFor(`[data-testid="${id}-unfollow"]`, 15000);
       if (!btn) {
         result = document.querySelector(`[data-testid="${id}-follow"]`)
           ? { ok: true, note: '本来就没关注' }
           : { ok: false, error: '找不到“正在关注”按钮' };
       } else {
+        if (getViewerId() !== authorization.owner) throw new Error('当前账号已变化，未执行取关');
+        if (await autoActionProtected(id)) throw new Error('该账号受名单保护，未执行取关');
         btn.click();
         const confirmBtn = await waitFor('[data-testid="confirmationSheetConfirm"]', 5000);
-        if (confirmBtn) confirmBtn.click();
+        if (confirmBtn) {
+          if (getViewerId() !== authorization.owner) throw new Error('当前账号已变化，未确认取关');
+          if (await autoActionProtected(id)) throw new Error('该账号受名单保护，未确认取关');
+          confirmBtn.click();
+        }
         const done = await waitFor(`[data-testid="${id}-follow"]`, 8000);
         result = done ? { ok: true } : { ok: false, error: '点击后未生效' };
       }
@@ -79,6 +92,17 @@
       result = { ok: false, error: String(e) };
     }
     chrome.storage.local.set({ [key]: result });
+  }
+  async function autoActionProtected(id) {
+    const owner = getViewerId();
+    if (!owner) return true;
+    const legacyKey = 'xmf_' + owner;
+    const protectionKey = 'xmf_guard_' + owner;
+    try {
+      const data = await chrome.storage.local.get([legacyKey, protectionKey]);
+      const guard = XmfGuards.createGuard(data[protectionKey], data[legacyKey] || {}, Date.now(), owner);
+      return !!XmfGuards.protection(guard, id, Date.now());
+    } catch { return true; }
   }
 
   // ---------- 与页面脚本通信 ----------
@@ -118,19 +142,53 @@
     return st;
   }
   const save = () => chrome.storage.local.set({ [skey()]: S.st });
+  const guardKey = () => 'xmf_guard_' + viewerId;
+  let guardWrites = Promise.resolve();
+  async function loadGuard() {
+    const result = await chrome.storage.local.get(guardKey());
+    const raw = result[guardKey()];
+    const guard = XmfGuards.createGuard(raw, S.st, Date.now(), viewerId);
+    if (!raw) await chrome.storage.local.set({ [guardKey()]: guard });
+    return guard;
+  }
+  function updateGuard(change, repaint = true) {
+    const operation = guardWrites.then(async () => {
+      const guard = await loadGuard();
+      change(guard);
+      await chrome.storage.local.set({ [guardKey()]: guard });
+      S.guard = guard;
+      S.guardError = false;
+      if (repaint) render();
+      return true;
+    });
+    guardWrites = operation.catch(() => {});
+    return operation.catch(() => {
+      S.guardError = true;
+      setProg('保护设置保存失败，已禁止账号操作；原名单仍保留。');
+      render();
+      return false;
+    });
+  }
+  function setProtectionPreference(change) {
+    S.sel.clear();
+    return updateGuard(g => Object.assign(g.preferences, change)).then(() => { resetPaging(); render(); });
+  }
 
   // ---------- 状态 ----------
   const S = {
     st: null,
-    tab: 'unf',
+    tab: 'nfb',
     kind: 'real',
     onlyBlue: true,
+    sort: 'default',
     q: '',
     sel: new Set(),
     rowStatus: {},
     scanning: false,
     bulk: false,
     stopBulk: false,
+    guard: null,
+    guardError: false,
   };
 
   // ---------- 界面 ----------
@@ -139,18 +197,26 @@
 
   const root = h(
     'div',
-    { id: 'xmf-root' },
+    { id: 'xmf-root', 'data-xmf-version': '1.9.4', 'data-xmf-build': '20261031.2' },
     ref(
       'panel',
       h(
         'div',
         { class: 'xmf-panel', hidden: true },
-        h(
+        ref('head', h(
           'div',
-          { class: 'xmf-head' },
-          h('div', null, h('div', { class: 'xmf-title' }, '互关检测助手'), ref('sub', h('div', { class: 'xmf-sub' }))),
+          { class: 'xmf-head', title: '按住标题栏可上下移动面板' },
+          h('div', null, h('div', { class: 'xmf-eyebrow' }, 'FOLLOW WORKSPACE · 本地管理'), h('div', { class: 'xmf-title' }, '互关检测助手'), ref('sub', h('div', { class: 'xmf-sub' }))),
+          h('div', { class: 'xmf-window-tools' },
+          h('button', { class: 'xmf-size-btn', title: '铺满屏幕可用高度，显示更多账号', onclick: () => setPanelLayout(12, window.innerHeight - 24, true) }, '铺满'),
+          h('button', { class: 'xmf-size-btn', title: '恢复默认位置与高度', onclick: () => resetPanelLayout() }, '重置'),
           h('button', { class: 'xmf-x', title: '关闭', onclick: () => togglePanel(false) }, '×')
-        ),
+          )
+        )),
+        h('div', { class: 'xmf-stats' },
+          h('div', null, ref('statFollowing', h('strong', null, '—')), h('span', null, '已扫描关注')),
+          h('div', null, ref('statShown', h('strong', null, '0')), h('span', null, '本次显示')),
+          h('div', null, ref('statWhite', h('strong', null, '0')), h('span', null, '永久白名单'))),
         h(
           'div',
           { class: 'xmf-bar' },
@@ -170,8 +236,9 @@
         h(
           'div',
           { class: 'xmf-tabs' },
-          ref('tabUnf', h('button', { class: 'on', onclick: () => setTab('unf') }, '取关了我 ', ref('cUnf', h('b', null, '0')))),
-          ref('tabNfb', h('button', { onclick: () => setTab('nfb') }, '未回关 ', ref('cNfb', h('b', null, '0'))))
+          ref('tabUnf', h('button', { onclick: () => setTab('unf') }, '取关了我 ', ref('cUnf', h('b', null, '0')))),
+          ref('tabNfb', h('button', { class: 'on', onclick: () => setTab('nfb') }, '未回关 ', ref('cNfb', h('b', null, '0')))),
+          ref('tabWhite', h('button', { onclick: () => setTab('white') }, '白名单 ', ref('cWhite', h('b', null, '0'))))
         ),
         ref(
           'kinds',
@@ -218,8 +285,32 @@
               resetPaging();
               render();
             },
-          })
+          }),
+          ref('sort', h('select', {
+            class: 'xmf-sort',
+            'aria-label': '名单排序',
+            onchange: (e) => {
+              S.sort = e.target.value;
+              chrome.storage.local.set({ xmf_sort_order: S.sort });
+              resetPaging();
+              render();
+            },
+          },
+          h('option', { value: 'default' }, '默认排序'),
+          h('option', { value: 'followers_desc' }, '粉丝数：多到少'),
+          h('option', { value: 'followers_asc' }, '粉丝数：少到多')))
         ),
+        ref('protectionTools', h('div', { class: 'xmf-protection' },
+          h('label', null, '排除近期关注', ref('period', h('select', {
+            'aria-label': '排除近期关注',
+            onchange: e => setProtectionPreference({ period: e.target.value }),
+          }, h('option', { value: 'off' }, '不排除'), h('option', { value: 'today' }, '今天关注'), h('option', { value: '7d' }, '近7天关注')))),
+          h('label', null, ref('protectUnknown', h('input', {
+            type: 'checkbox', 'aria-label': '保护时间未知的账号',
+            onchange: e => setProtectionPreference({ protectUnknown: e.target.checked }),
+          })), ' 保护日期未知账号'),
+          ref('guardNote', h('div', { class: 'xmf-guard-note' }))
+        )),
         ref('hint', h('div', { class: 'xmf-hint' })),
         ref('list', h('div', { class: 'xmf-list' })),
         h(
@@ -234,8 +325,10 @@
           ref('selN', h('span', { class: 'xmf-seln' })),
           h('div', { class: 'xmf-sp' }),
           h('button', { class: 'xmf-btn', onclick: () => exportCsv() }, '导出CSV'),
+          ref('whiteBtn', h('button', { class: 'xmf-btn', onclick: () => whitelistSelected() }, '加入白名单')),
           ref('bulkBtn', h('button', { class: 'xmf-btn danger', onclick: () => bulkUnfollow() }, '取关选中'))
-        )
+        ),
+        ref('resizer', h('div', { class: 'xmf-resizer', role: 'separator', tabindex: '0', 'aria-label': '面板高度', 'aria-orientation': 'horizontal', title: '上下拖动调整高度；也可用方向键调节' }))
       )
     )
   );
@@ -277,6 +370,21 @@
 
   // 拖动：按住上下拖，松开记住位置；没拖动就当作点击
   const DOCK = { y: null };
+  const PANEL = { top: null, height: null };
+  function savePanelLayout() {
+    chrome.storage.local.set({ xmf_panel_layout: { top: PANEL.top / window.innerHeight, height: PANEL.height / window.innerHeight } });
+  }
+  function setPanelLayout(top, height, persist = false) {
+    Object.assign(PANEL, XmfUI.fitPanel(window.innerHeight, top, height));
+    placePanel();
+    if (persist) savePanelLayout();
+  }
+  function resetPanelLayout() {
+    PANEL.top = null;
+    PANEL.height = null;
+    placePanel();
+    savePanelLayout();
+  }
   function placeDock(y) {
     const max = window.innerHeight - 56 - 12;
     DOCK.y = Math.max(12, Math.min(max, y == null ? window.innerHeight - 56 - 96 : y));
@@ -285,10 +393,39 @@
   }
   function placePanel() {
     if (!R.panel || R.panel.hidden) return;
-    const ph = R.panel.offsetHeight || 600;
+    const ph = PANEL.height == null ? (window.innerHeight > window.innerWidth ? window.innerHeight - 24 : 640) : PANEL.height;
     const dockY = DOCK.y == null ? window.innerHeight - 56 - 96 : DOCK.y;
-    const top = Math.max(12, Math.min(window.innerHeight - ph - 12, dockY + 56 - ph));
-    R.panel.style.top = top + 'px';
+    const controlsHeight = [...R.panel.children].filter(el => el !== R.list && !el.hidden).reduce((total, el) => {
+      const style = getComputedStyle(el);
+      return style.display === 'none' ? total : total + el.offsetHeight + (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+    }, 0);
+    Object.assign(PANEL, XmfUI.fitPanel(window.innerHeight, PANEL.top == null ? dockY + 56 - ph : PANEL.top, ph, Math.ceil(controlsHeight + 58)));
+    R.panel.style.top = PANEL.top + 'px';
+    R.panel.style.height = PANEL.height + 'px';
+    R.panel.scrollTop = 0;
+    R.resizer.setAttribute('aria-valuemin', PANEL.minHeight);
+    R.resizer.setAttribute('aria-valuemax', PANEL.maxHeight);
+    R.resizer.setAttribute('aria-valuenow', Math.round(PANEL.height));
+  }
+  function bindPanelHandle(handle, resizing) {
+    let start = null;
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('button, input, select, a')) return;
+      start = { y: e.clientY, top: PANEL.top, height: PANEL.height };
+      handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!start) return;
+      const dy = e.clientY - start.y;
+      setPanelLayout(resizing ? start.top : start.top + dy, resizing ? start.height + dy : start.height);
+    });
+    handle.addEventListener('pointerup', () => {
+      if (!start) return;
+      start = null;
+      savePanelLayout();
+    });
+    handle.addEventListener('pointercancel', () => { start = null; });
   }
   function bindDrag() {
     let start = null;
@@ -320,13 +457,20 @@
       start = null;
       R.dock.classList.remove('dragging');
     });
-    window.addEventListener('resize', () => placeDock(DOCK.y));
+    let viewportHeight = window.innerHeight;
+    window.addEventListener('resize', () => {
+      const ratio = window.innerHeight / viewportHeight;
+      if (PANEL.top != null) PANEL.top *= ratio;
+      if (PANEL.height != null) PANEL.height *= ratio;
+      viewportHeight = window.innerHeight;
+      placeDock(DOCK.y);
+    });
   }
 
   // 角标：取关了我的人数（只算没忽略的）
   function updateBadge() {
     if (!R.fabBadge || !S.st) return;
-    const n = Object.values(S.st.unfollowers).filter((u) => !S.st.ignored[u.id] && isReal(u)).length;
+    const n = Object.values(S.st.unfollowers).filter((u) => !S.guard?.whitelist[u.id] && isReal(u)).length;
     R.fabBadge.hidden = !n || S.scanning;
     R.fabBadge.textContent = n > 99 ? '99+' : String(n);
     R.fabTip.textContent = S.scanning ? '扫描中…' : n ? `${n} 个人取关了你` : '互关检测助手';
@@ -380,6 +524,14 @@
   new MutationObserver(scheduleTheme).observe(document.head, { subtree: true, attributes: true, attributeFilter: ['content'] });
 
   root.prepend(buildDock());
+  bindPanelHandle(R.head, false);
+  bindPanelHandle(R.resizer, true);
+  R.resizer.addEventListener('keydown', (e) => {
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const height = e.key === 'Home' ? PANEL.minHeight : e.key === 'End' ? PANEL.maxHeight : PANEL.height + (e.key === 'ArrowUp' ? -24 : 24);
+    setPanelLayout(PANEL.top, height, true);
+  });
 
   function setProg(t) {
     R.prog.textContent = t || '';
@@ -403,6 +555,7 @@
     S.sel.clear();
     R.tabUnf.classList.toggle('on', t === 'unf');
     R.tabNfb.classList.toggle('on', t === 'nfb');
+    R.tabWhite.classList.toggle('on', t === 'white');
     resetPaging();
     render();
   }
@@ -427,20 +580,20 @@
 
   function baseList(tab) {
     const st = S.st;
+    if (tab === 'white') return Object.values(S.guard.whitelist);
     const src = tab === 'unf' ? Object.values(st.unfollowers) : st.nonFollowback;
-    return src.filter((u) => !st.ignored[u.id] && (!S.onlyBlue || u.blue));
+    return src.filter((u) => !S.guard.whitelist[u.id] && (!S.onlyBlue || u.blue));
   }
 
   function currentList() {
     let list = baseList(S.tab);
     if (S.tab === 'unf') list = list.filter((u) => (S.kind === 'odd' ? !isReal(u) : isReal(u)));
+    if (S.tab !== 'white') list = list.filter(u => !XmfGuards.protection(S.guard, u.id, Date.now()));
     if (S.q)
       list = list.filter(
         (u) => (u.name || '').toLowerCase().includes(S.q) || (u.screen_name || '').toLowerCase().includes(S.q)
       );
-    return S.tab === 'unf'
-      ? list.sort((a, b) => (b.detectedAt || 0) - (a.detectedAt || 0))
-      : list.sort((a, b) => (b.followers || 0) - (a.followers || 0));
+    return XmfUI.sortUsers(list, S.sort, S.tab);
   }
 
   // 列表只渲染前 PAGE 行，点“显示更多”再加，避免几千行一起渲染吃内存
@@ -467,6 +620,21 @@
     R.cOdd.textContent = unfAll.length - realN;
     R.kinds.hidden = S.tab !== 'unf';
     R.cNfb.textContent = baseList('nfb').length;
+    const whiteCount = Object.keys(S.guard.whitelist).length;
+    R.cWhite.textContent = whiteCount;
+    R.statFollowing.textContent = st.lastCount || '—';
+    R.statWhite.textContent = whiteCount;
+    R.blue.disabled = S.tab === 'white';
+    R.blue.parentElement.hidden = S.tab === 'white';
+    R.protectionTools.hidden = S.tab === 'white';
+    R.period.value = S.guard.preferences.period;
+    R.protectUnknown.checked = S.guard.preferences.protectUnknown;
+    R.protectUnknown.disabled = S.guard.preferences.period === 'off';
+    const protectedRows = S.tab === 'white' ? [] : baseList(S.tab).filter(u => XmfGuards.protection(S.guard, u.id, Date.now()));
+    const unknownProtected = protectedRows.filter(u => XmfGuards.protection(S.guard, u.id, Date.now()) === 'unknown').length;
+    R.guardNote.textContent = S.guardError ? '保护设置未能保存，已禁止账号操作。'
+      : S.guard.preferences.period === 'off' ? '新关注从本版本开始记录；历史未知日期不会被伪造。'
+      : `已保护 ${protectedRows.length} 个，其中日期未知 ${unknownProtected} 个。日期依据显示在账号下方。`;
 
     let hint = '';
     if (S.tab === 'unf') {
@@ -476,17 +644,19 @@
       else if (S.kind === 'odd')
         hint =
           '这些账号曾经和你互关，现在不再关注你，但不是主动取关：「账号受限」是被 X 限制了（主页显示「此账号暂时受限」），「关注数为 0」是对方清空了全部关注，通常也是账号出了问题。账号恢复后可能会重新关注你，一般不用急着取关。';
+    } else if (S.tab === 'white') {
+      hint = '白名单会一直保留，不参与候选或取关。移出后，账号才会重新参与筛选。';
     } else {
-      const all = st.nonFollowback.filter((u) => !st.ignored[u.id]);
-      hint = `你关注了、但目前没有关注你的账号（包括从来没回关的）：共 ${all.length} 个，其中蓝V ${all.filter((u) => u.blue).length} 个。${S.onlyBlue ? '当前只显示蓝V，取消勾选“仅蓝V”可看全部。' : ''}`;
+      hint = `已记录的未回关名单。${S.onlyBlue ? '当前仅显示蓝V。' : ''}可组合排序、近期保护与白名单。`;
     }
-    if (st.lastScanAt) hint += ' 结果已保存，打开面板就能看，不用每次都重新扫描。';
+    if (st.lastScanAt && S.tab !== 'white') hint += ' 名单已在本机保存。';
     if (st.lastCount && st.unknown > st.lastCount * 0.5)
       hint += ' ⚠ 有大量账号无法判断是否关注你，X 可能改了接口，结果可能不准。';
     R.hint.textContent = hint;
     R.hint.hidden = !hint;
 
     const list = currentList();
+    R.statShown.textContent = list.length;
     S.list = list;
     const ids = new Set(list.map((u) => u.id));
     for (const id of [...S.sel]) if (!ids.has(id)) S.sel.delete(id);
@@ -496,7 +666,9 @@
     rowMeta.clear();
     const kids = shown.length
       ? shown.map(row)
-      : [h('div', { class: 'xmf-empty' }, st.lastScanAt ? '没有符合条件的账号' : '点击“开始扫描”')];
+      : [h('div', { class: 'xmf-empty' }, S.tab === 'white' ? '还没有白名单账号，可从候选名单加入。'
+        : protectedRows.length ? `已排除 ${protectedRows.length} 个受保护账号。可调整保护范围；白名单始终保留。`
+        : st.lastScanAt ? '没有符合条件的账号' : '点击“开始扫描”')];
     if (list.length > shown.length)
       kids.push(
         h(
@@ -515,12 +687,19 @@
     R.list.replaceChildren(...kids);
     R.list.scrollTop = top;
     updateFoot();
+    placePanel();
   }
 
   function updateFoot() {
     const n = (S.list || []).length;
     R.selN.textContent = S.sel.size ? `已选 ${S.sel.size}` : '';
     R.all.checked = n > 0 && S.sel.size === n;
+    const whiteView = S.tab === 'white';
+    R.all.parentElement.hidden = whiteView;
+    R.whiteBtn.hidden = whiteView;
+    R.whiteBtn.disabled = !S.sel.size || S.bulk || S.guardError;
+    R.bulkBtn.hidden = whiteView && !S.bulk;
+    R.bulkBtn.disabled = !S.bulk && (whiteView || !S.sel.size || S.guardError);
   }
 
   function metaText(u) {
@@ -528,7 +707,15 @@
       u.followers != null ? fmtNum(u.followers) + ' 粉丝' : '粉丝数未知',
     ];
     if (u.detectedAt) parts.push('发现于 ' + fmtDate(u.detectedAt));
+    parts.push(followTimeText(u.id));
+    if (S.tab === 'white') parts.push(u.addedAt ? '加入白名单 ' + fmtDate(u.addedAt) : '历史忽略项已保留');
     return parts.join(' · ');
+  }
+  function followTimeText(id) {
+    const info = XmfGuards.dateInfo(S.guard, id);
+    if (info.kind === 'confirmed') return '本机观察关注 ' + fmtDate(info.to);
+    if (info.kind === 'interval') return '新增出现在 ' + fmtDate(info.from) + '～' + fmtDate(info.to);
+    return '关注日期未知';
   }
 
   function stateTag(u) {
@@ -549,24 +736,27 @@
       { class: 'xmf-row' },
       h('input', {
         type: 'checkbox',
+        disabled: S.tab === 'white' || S.bulk,
+        'aria-label': '选择 @' + (u.screen_name || u.id),
         checked: S.sel.has(u.id),
         onchange: (e) => {
           e.target.checked ? S.sel.add(u.id) : S.sel.delete(u.id);
           updateFoot();
         },
       }),
-      h('img', { class: 'xmf-av', 'data-uid': u.id, src: u.avatar || '', loading: 'lazy', decoding: 'async', alt: '' }),
+      u.avatar ? h('img', { class: 'xmf-av', 'data-uid': u.id, src: u.avatar, loading: 'lazy', decoding: 'async', alt: '' })
+        : h('div', { class: 'xmf-av xmf-avatar-empty', 'aria-hidden': 'true' }, '↔'),
       h(
         'div',
         { class: 'xmf-info' },
         h(
           'div',
           { class: 'xmf-name' },
-          h('span', { class: 'xmf-nm', 'data-uid': u.id }, u.name || u.screen_name),
+          h('span', { class: 'xmf-nm', 'data-uid': u.id }, u.name || u.screen_name || '历史账号 ' + u.id),
           u.blue ? h('span', { class: 'xmf-badge' + (u.verifiedType === 'Business' ? ' gold' : ''), title: '已认证' }, '✓') : null,
           stateTag(u)
         ),
-        h('a', { class: 'xmf-handle', 'data-uid': u.id, href: '/' + u.screen_name, target: '_blank', rel: 'noopener' }, '@' + u.screen_name),
+        h('a', { class: 'xmf-handle', 'data-uid': u.id, href: u.screen_name ? '/' + u.screen_name : '/i/user/' + u.id, target: '_blank', rel: 'noopener' }, u.screen_name ? '@' + u.screen_name : '账号 ID ' + u.id),
         h(
           'div',
           { class: 'xmf-meta' },
@@ -577,8 +767,9 @@
       h(
         'div',
         { class: 'xmf-acts' },
-        h('button', { class: 'xmf-btn sm danger', disabled: S.bulk, onclick: () => unfollowSingle(u) }, '取关'),
-        h('button', { class: 'xmf-btn sm', title: '以后不再显示', onclick: () => ignore(u) }, '忽略')
+        S.tab === 'white' ? h('button', { class: 'xmf-btn sm', onclick: () => removeWhitelist(u) }, '移出白名单')
+          : h('button', { class: 'xmf-btn sm danger', disabled: S.bulk || S.guardError, onclick: () => unfollowSingle(u) }, '取关'),
+        S.tab === 'white' ? null : h('button', { class: 'xmf-btn sm', title: '永久排除，可在白名单页恢复', disabled: S.bulk || S.guardError, onclick: () => ignore(u) }, '加白名单')
       )
     );
   }
@@ -747,9 +938,18 @@
   }
 
   async function ignore(u) {
-    S.st.ignored[u.id] = 1;
     S.sel.delete(u.id);
-    await save();
+    await updateGuard(g => XmfGuards.addWhitelist(g, [u], Date.now()));
+    render();
+  }
+  async function whitelistSelected() {
+    const users = currentList().filter(u => S.sel.has(u.id));
+    if (!users.length || S.bulk) return;
+    if (await updateGuard(g => XmfGuards.addWhitelist(g, users, Date.now()))) S.sel.clear();
+    render();
+  }
+  async function removeWhitelist(u) {
+    await updateGuard(g => XmfGuards.removeWhitelist(g, u.id));
     render();
   }
 
@@ -886,6 +1086,7 @@
     const st = (S.st = await load());
     const now = Date.now();
     applyCountCache(st, users);
+    await updateGuard(g => XmfGuards.observeScan(g, users, endReached === true && !partial, now), false);
     const cur = new Map(users.map((u) => [u.id, u]));
     let added = 0;
 
@@ -922,14 +1123,25 @@
 
   // ---------- 取关 ----------
   async function doUnfollow(u) {
+    try { S.guard = await loadGuard(); } catch { S.guardError = true; }
+    if (S.guardError || XmfGuards.protection(S.guard, u.id, Date.now())) {
+      setProg('已跳过受保护账号：白名单、近期关注或日期未知保护仍生效。');
+      return null;
+    }
     S.rowStatus[u.id] = { text: '取关中…' };
     render();
     let r = await callPage('unfollow', { id: u.id });
     if (!r.ok) {
+      try { S.guard = await loadGuard(); } catch { S.guardError = true; }
+      if (S.guardError || XmfGuards.protection(S.guard, u.id, Date.now())) {
+        delete S.rowStatus[u.id];
+        render();
+        return null;
+      }
       S.rowStatus[u.id] = { text: `接口失败(${r.error})，改用页面方式…` };
       render();
       r = await chrome.runtime
-        .sendMessage({ type: 'unfollowViaTab', id: u.id, screen_name: u.screen_name, origin: location.origin })
+        .sendMessage({ type: 'unfollowViaTab', id: u.id, screen_name: u.screen_name, origin: location.origin, owner: viewerId })
         .catch((e) => ({ ok: false, error: String(e) }));
     }
     if (r && r.ok) {
@@ -950,6 +1162,8 @@
 
   async function unfollowSingle(u) {
     if (S.bulk) return;
+    try { S.guard = await loadGuard(); } catch { S.guardError = true; }
+    if (S.guardError || XmfGuards.protection(S.guard, u.id, Date.now())) return setProg('此账号受到名单保护，未执行取关。');
     if (!confirm(`确定取关 @${u.screen_name}？`)) return;
     await doUnfollow(u);
   }
@@ -969,16 +1183,19 @@
     R.bulkBtn.textContent = '停止取关';
     let ok = 0;
     let fail = 0;
+    let skipped = 0;
     for (let i = 0; i < list.length && !S.stopBulk; i++) {
       setProg(`取关中 ${i + 1}/${list.length}（成功 ${ok}，失败 ${fail}）`);
-      (await doUnfollow(list[i])) ? ok++ : fail++;
+      const result = await doUnfollow(list[i]);
+      if (result === null) skipped++;
+      else result ? ok++ : fail++;
       if (fail >= 3 && ok === 0) {
         setProg('连续失败，已暂停。可能被限流，过一会再试');
         break;
       }
       if (i < list.length - 1 && !S.stopBulk) await sleep(DELAY_MIN + Math.random() * (DELAY_MAX - DELAY_MIN));
     }
-    if (!(fail >= 3 && ok === 0)) setProg(`取关完成：成功 ${ok}，失败 ${fail}${S.stopBulk ? '（已手动停止）' : ''}`);
+    if (!(fail >= 3 && ok === 0)) setProg(`取关完成：成功 ${ok}，失败 ${fail}，保护跳过 ${skipped}${S.stopBulk ? '（已手动停止）' : ''}`);
     S.bulk = false;
     R.bulkBtn.textContent = '取关选中';
     render();
@@ -988,21 +1205,22 @@
     const list = currentList();
     if (!list.length) return setProg('当前列表为空');
     const STATE_TEXT = { real: '真的取关', restricted: '账号受限', cleared: '关注数为0' };
-    const rows = [['名称', '用户名', '主页', '粉丝数', '蓝V', '状态', '发现时间']].concat(
+    const rows = [['名称', '用户名', '主页', '粉丝数', '蓝V', '状态', '发现时间', '关注时间依据']].concat(
       list.map((u) => [
-        u.name,
-        '@' + u.screen_name,
-        location.origin + '/' + u.screen_name,
+        u.name || u.screen_name || '历史账号 ' + u.id,
+        u.screen_name ? '@' + u.screen_name : '账号 ID ' + u.id,
+        location.origin + (u.screen_name ? '/' + u.screen_name : '/i/user/' + u.id),
         u.followers,
-        u.blue ? '是' : '否',
-        S.tab === 'unf' ? STATE_TEXT[accountState(u)] : '未回关',
+        typeof u.blue !== 'boolean' ? '未知' : u.blue ? '是' : '否',
+        S.tab === 'white' ? '白名单' : S.tab === 'unf' ? STATE_TEXT[accountState(u)] : '未回关',
         u.detectedAt ? fmtDate(u.detectedAt) : '',
+        followTimeText(u.id),
       ])
     );
     const csv = '﻿' + rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = h('a', {
       href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })),
-      download: `x-${S.tab === 'unf' ? '取关了我' : '未回关'}-${fmtDate(Date.now()).slice(0, 10)}.csv`,
+      download: `x-${S.tab === 'white' ? '白名单' : S.tab === 'unf' ? '取关了我' : '未回关'}-${fmtDate(Date.now()).slice(0, 10)}.csv`,
     });
     document.body.append(a);
     a.click();
@@ -1014,6 +1232,17 @@
     for (let i = 0; i < 40 && !(viewerId = getViewerId()); i++) await sleep(500);
     if (!viewerId) return; // 未登录
     S.st = fixZeroCounts(await load());
+    try { S.guard = await loadGuard(); }
+    catch { S.guard = XmfGuards.createGuard(null, S.st, Date.now(), viewerId); S.guardError = true; }
+    observeSuccessfulFollows();
+    const preferences = await chrome.storage.local.get(['xmf_sort_order', 'xmf_panel_layout']);
+    if (['default', 'followers_desc', 'followers_asc'].includes(preferences.xmf_sort_order)) S.sort = preferences.xmf_sort_order;
+    R.sort.value = S.sort;
+    const layout = preferences.xmf_panel_layout;
+    if (layout && Number.isFinite(layout.top) && Number.isFinite(layout.height)) {
+      PANEL.top = layout.top * window.innerHeight;
+      PANEL.height = layout.height * window.innerHeight;
+    }
 
     // 开关：点浏览器工具栏上的插件图标切换，关闭时页面上不显示任何东西
     const setEnabled = (on, openPanel) => {
@@ -1036,6 +1265,9 @@
     };
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.xmf_enabled) setEnabled(!!changes.xmf_enabled.newValue, true);
+      if (area === 'local' && changes[guardKey()]) {
+        loadGuard().then(g => { S.guard = g; render(); }).catch(() => { S.guardError = true; render(); });
+      }
     });
     const { xmf_enabled } = await chrome.storage.local.get('xmf_enabled');
     setEnabled(!!xmf_enabled, false);
@@ -1050,5 +1282,30 @@
       startScan();
     }
   }
+  function observeSuccessfulFollows() {
+    const waiting = new Map();
+    const observer = new MutationObserver(() => {
+      for (const [id, expires] of waiting) {
+        if (Date.now() > expires) { waiting.delete(id); continue; }
+        if (document.querySelector(`[data-testid="${id}-unfollow"]`)) {
+          waiting.delete(id);
+          updateGuard(g => XmfGuards.confirmFollow(g, id, Date.now()));
+        }
+      }
+      if (!waiting.size) observer.disconnect();
+    });
+    document.addEventListener('click', e => {
+      if (!e.isTrusted || !root.isConnected) return;
+      const button = e.target.closest?.('[data-testid]');
+      if (!button || root.contains(button)) return;
+      const match = button.getAttribute('data-testid')?.match(/^(\d{1,25})-follow$/);
+      if (!match) return;
+      const id = match[1];
+      waiting.set(id, Date.now() + 20000);
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-testid'] });
+      setTimeout(() => { waiting.delete(id); if (!waiting.size) observer.disconnect(); }, 21000);
+    }, true);
+  }
   init();
 })();
+
