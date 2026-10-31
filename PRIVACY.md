@@ -32,7 +32,12 @@
 
 ## 支持
 
-请通过本增强版 GitHub 仓库的 Issues 联系维护者：
-https://github.com/guo1978-hong/x-mutual-checker/issues
+本增强版的维护仓库：
+https://github.com/guo1978-hong/x-mutual-checker
+
+可通过仓库的 Pull requests 提交不含个人数据的功能或问题反馈：
+https://github.com/guo1978-hong/x-mutual-checker/pulls
+
+不要在公开反馈中提交账号名单、密码、Cookie、令牌或付款资料。本地数据删除方法见上节。
 
 本政策不会授予上游源码的站外分发许可；Chrome 商店发布状态以真实商店页面为准。
